@@ -44,5 +44,63 @@ def get_pending_requirements():
     return json.dumps(pending) if pending else "Không có yêu cầu mới nào."
 
 
+@mcp.tool()
+def list_api_requirements():
+    """Lấy toàn bộ danh sách API specs hiện có trong DB."""
+    db = load_db()
+    reqs = db["api_requirements"]
+    if not reqs:
+        return "DB hiện đang trống."
+    result = []
+    for i, req in enumerate(reqs):
+        result.append({"index": i, **req})
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool()
+def update_api_requirement(
+    index: int,
+    endpoint: str = "",
+    method: str = "",
+    description: str = "",
+    status: str = "",
+):
+    """Chỉnh sửa một API spec có sẵn theo index.
+
+    Args:
+        index: Vị trí của API spec trong danh sách (lấy từ list_api_requirements)
+        endpoint: Endpoint mới (để trống nếu không đổi)
+        method: Method mới (để trống nếu không đổi)
+        description: Mô tả mới (để trống nếu không đổi)
+        status: Trạng thái mới (để trống nếu không đổi)
+    """
+    db = load_db()
+    reqs = db["api_requirements"]
+    if index < 0 or index >= len(reqs):
+        return f"Lỗi: index {index} không hợp lệ. DB có {len(reqs)} specs (0-{len(reqs) - 1})."
+
+    if endpoint:
+        reqs[index]["endpoint"] = endpoint
+    if method:
+        reqs[index]["method"] = method
+    if description:
+        reqs[index]["description"] = description
+    if status:
+        reqs[index]["status"] = status
+
+    save_db(db)
+    return f"Đã cập nhật API spec #{index}: {reqs[index]['method']} {reqs[index]['endpoint']}"
+
+
+@mcp.tool()
+def reset_api_requirements():
+    """Xóa toàn bộ API specs trong DB để bắt đầu mới."""
+    db = load_db()
+    db["api_requirements"] = []
+    db["last_updated"] = ""
+    save_db(db)
+    return "Đã xóa toàn bộ API specs. DB đã được reset."
+
+
 if __name__ == "__main__":
     mcp.run()
