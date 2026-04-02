@@ -6,6 +6,7 @@ dynamic-docs/docs/
 dynamic-docs/blog/
 dynamic-docs/site-config.json
 dynamic-docs/sidebars.js
+dynamic-docs/openapi.json
 dynamic-docs/.docusaurus
 dynamic-docs/build
 dynamic-docs/package-lock.json

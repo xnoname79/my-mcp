@@ -383,6 +383,262 @@ def get_docs_stats():
     }, ensure_ascii=False)
 
 
+# --------------- OpenAPI Spec ---------------
+
+
+@mcp.tool()
+def add_api_spec(
+    path: str,
+    method: str,
+    summary: str,
+    description: str = "",
+    tag: str = "",
+    request_body: str = "",
+    response_body: str = "",
+    response_code: int = 200,
+    parameters: str = "",
+):
+    """Thêm một API endpoint vào OpenAPI spec.
+
+    Args:
+        path: Đường dẫn API, ví dụ "/api/users"
+        method: HTTP method: get, post, put, patch, delete
+        summary: Mô tả ngắn
+        description: Mô tả chi tiết (hỗ trợ Markdown)
+        tag: Nhóm API, ví dụ "Users", "Auth"
+        request_body: JSON string mô tả request body schema, ví dụ:
+            {"type": "object", "properties": {"name": {"type": "string"}, "email": {"type": "string"}}}
+        response_body: JSON string mô tả response body schema
+        response_code: HTTP status code cho response, mặc định 200
+        parameters: JSON string array mô tả query/path params, ví dụ:
+            [{"name": "id", "in": "path", "required": true, "schema": {"type": "integer"}}]
+    """
+    db = load_db()
+    api_specs = db.setdefault("api_specs", [])
+
+    spec = {
+        "path": path,
+        "method": method.lower(),
+        "summary": summary,
+        "description": description,
+        "tag": tag,
+    }
+
+    if request_body:
+        try:
+            spec["request_body"] = json.loads(request_body)
+        except json.JSONDecodeError:
+            return "Lỗi: request_body không phải JSON hợp lệ."
+
+    if response_body:
+        try:
+            spec["response_body"] = json.loads(response_body)
+        except json.JSONDecodeError:
+            return "Lỗi: response_body không phải JSON hợp lệ."
+
+    spec["response_code"] = response_code
+
+    if parameters:
+        try:
+            spec["parameters"] = json.loads(parameters)
+        except json.JSONDecodeError:
+            return "Lỗi: parameters không phải JSON hợp lệ."
+
+    api_specs.append(spec)
+    save_db(db)
+    return f"Đã thêm API spec: {method.upper()} {path}"
+
+
+@mcp.tool()
+def list_api_specs(tag: str = ""):
+    """Liệt kê tất cả API specs đã lưu.
+
+    Args:
+        tag: Lọc theo tag (để trống = tất cả)
+    """
+    db = load_db()
+    specs = db.get("api_specs", [])
+
+    if tag:
+        specs = [s for s in specs if s.get("tag", "").lower() == tag.lower()]
+
+    if not specs:
+        return "Chưa có API spec nào."
+
+    result = []
+    for i, s in enumerate(specs):
+        result.append({
+            "index": i,
+            "method": s["method"].upper(),
+            "path": s["path"],
+            "summary": s["summary"],
+            "tag": s.get("tag", ""),
+        })
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool()
+def update_api_spec(
+    index: int,
+    path: str = "",
+    method: str = "",
+    summary: str = "",
+    description: str = "",
+    tag: str = "",
+    request_body: str = "",
+    response_body: str = "",
+    response_code: int = -1,
+    parameters: str = "",
+):
+    """Cập nhật một API spec theo index.
+
+    Args:
+        index: Vị trí trong danh sách (lấy từ list_api_specs)
+        path: Đường dẫn mới (để trống = không đổi)
+        method: Method mới (để trống = không đổi)
+        summary: Summary mới (để trống = không đổi)
+        description: Description mới (để trống = không đổi)
+        tag: Tag mới (để trống = không đổi)
+        request_body: Request body schema mới, JSON string (để trống = không đổi)
+        response_body: Response body schema mới, JSON string (để trống = không đổi)
+        response_code: Response code mới (-1 = không đổi)
+        parameters: Parameters mới, JSON string (để trống = không đổi)
+    """
+    db = load_db()
+    specs = db.get("api_specs", [])
+    if index < 0 or index >= len(specs):
+        return f"Lỗi: index {index} không hợp lệ."
+
+    s = specs[index]
+    if path:
+        s["path"] = path
+    if method:
+        s["method"] = method.lower()
+    if summary:
+        s["summary"] = summary
+    if description:
+        s["description"] = description
+    if tag:
+        s["tag"] = tag
+    if request_body:
+        try:
+            s["request_body"] = json.loads(request_body)
+        except json.JSONDecodeError:
+            return "Lỗi: request_body không phải JSON hợp lệ."
+    if response_body:
+        try:
+            s["response_body"] = json.loads(response_body)
+        except json.JSONDecodeError:
+            return "Lỗi: response_body không phải JSON hợp lệ."
+    if response_code >= 0:
+        s["response_code"] = response_code
+    if parameters:
+        try:
+            s["parameters"] = json.loads(parameters)
+        except json.JSONDecodeError:
+            return "Lỗi: parameters không phải JSON hợp lệ."
+
+    save_db(db)
+    return f"Đã cập nhật API spec #{index}: {s['method'].upper()} {s['path']}"
+
+
+@mcp.tool()
+def delete_api_spec(index: int):
+    """Xóa một API spec theo index.
+
+    Args:
+        index: Vị trí trong danh sách
+    """
+    db = load_db()
+    specs = db.get("api_specs", [])
+    if index < 0 or index >= len(specs):
+        return f"Lỗi: index {index} không hợp lệ."
+
+    removed = specs.pop(index)
+    save_db(db)
+    return f"Đã xóa API spec: {removed['method'].upper()} {removed['path']}"
+
+
+@mcp.tool()
+def reset_api_specs():
+    """Xóa toàn bộ API specs."""
+    db = load_db()
+    db["api_specs"] = []
+    save_db(db)
+    return "Đã reset toàn bộ API specs."
+
+
+def _build_openapi_json(db):
+    """Convert API specs từ DB thành OpenAPI 3.0 JSON."""
+    specs = db.get("api_specs", [])
+    if not specs:
+        return None
+
+    site_config = db.get("site_config", {})
+    openapi = {
+        "openapi": "3.0.3",
+        "info": {
+            "title": site_config.get("title", "API Documentation"),
+            "description": site_config.get("tagline", ""),
+            "version": "1.0.0",
+        },
+        "paths": {},
+        "tags": [],
+    }
+
+    # Collect tags
+    tag_set = set()
+    for s in specs:
+        if s.get("tag"):
+            tag_set.add(s["tag"])
+    openapi["tags"] = [{"name": t} for t in sorted(tag_set)]
+
+    # Build paths
+    for s in specs:
+        path = s["path"]
+        method = s["method"]
+
+        if path not in openapi["paths"]:
+            openapi["paths"][path] = {}
+
+        operation = {
+            "summary": s["summary"],
+            "description": s.get("description", ""),
+            "responses": {
+                str(s.get("response_code", 200)): {
+                    "description": "Success",
+                },
+            },
+        }
+
+        if s.get("tag"):
+            operation["tags"] = [s["tag"]]
+
+        if s.get("parameters"):
+            operation["parameters"] = s["parameters"]
+
+        if s.get("request_body"):
+            operation["requestBody"] = {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": s["request_body"],
+                    },
+                },
+            }
+
+        if s.get("response_body"):
+            operation["responses"][str(s.get("response_code", 200))]["content"] = {
+                "application/json": {
+                    "schema": s["response_body"],
+                },
+            }
+
+        openapi["paths"][path][method] = operation
+
+    return openapi
+
+
 # --------------- Build & Serve ---------------
 
 
@@ -456,12 +712,56 @@ def build_docs():
         sidebar = db.get("sidebar", [])
 
     if sidebar:
-        sidebars_content = (
-            "// Auto-generated by Docusaurus-Docs MCP\n"
-            "/** @type {import('@docusaurus/plugin-content-docs').SidebarsConfig} */\n"
-            f"const sidebars = {{\n  docs: {json.dumps(sidebar, indent=4, ensure_ascii=False)}\n}};\n\n"
-            "module.exports = sidebars;\n"
-        )
+        # Check if OpenAPI generated sidebar exists
+        api_sidebar_path = os.path.join(DOCS_PROJECT_DIR, "docs", "api-reference", "sidebar.ts")
+        has_api_sidebar = os.path.exists(api_sidebar_path)
+
+        if has_api_sidebar:
+            # Find the intro page ID from generated sidebar.ts
+            api_intro_id = ""
+            try:
+                with open(api_sidebar_path, "r") as sf:
+                    for line in sf:
+                        if '"api-reference/' in line and '.info' not in line and 'id:' in line:
+                            # First doc entry is the intro
+                            api_intro_id = line.split('"')[1]
+                            break
+            except Exception:
+                pass
+
+            # Build API sidebar section
+            api_section = "  api: apiSidebar,\n"
+            if api_intro_id:
+                api_section = (
+                    "  api: [{\n"
+                    '    type: "category",\n'
+                    '    label: "API Reference",\n'
+                    "    link: {\n"
+                    '      type: "doc",\n'
+                    f'      id: "{api_intro_id}",\n'
+                    "    },\n"
+                    "    items: apiSidebar,\n"
+                    "  }],\n"
+                )
+
+            sidebars_content = (
+                "// Auto-generated by Docusaurus-Docs MCP\n"
+                "import apiSidebar from './docs/api-reference/sidebar.ts';\n\n"
+                "/** @type {import('@docusaurus/plugin-content-docs').SidebarsConfig} */\n"
+                "const sidebars = {\n"
+                f"  docs: {json.dumps(sidebar, indent=4, ensure_ascii=False)},\n"
+                + api_section +
+                "};\n\n"
+                "export default sidebars;\n"
+            )
+        else:
+            sidebars_content = (
+                "// Auto-generated by Docusaurus-Docs MCP\n"
+                "/** @type {import('@docusaurus/plugin-content-docs').SidebarsConfig} */\n"
+                f"const sidebars = {{\n  docs: {json.dumps(sidebar, indent=4, ensure_ascii=False)}\n}};\n\n"
+                "module.exports = sidebars;\n"
+            )
+
         sidebars_path = os.path.join(DOCS_PROJECT_DIR, "sidebars.js")
         with open(sidebars_path, "w", encoding="utf-8") as f:
             f.write(sidebars_content)
@@ -472,11 +772,25 @@ def build_docs():
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(site_config, f, indent=2, ensure_ascii=False)
 
-    return json.dumps({
+    # Build openapi.json if API specs exist
+    openapi = _build_openapi_json(db)
+    openapi_path = os.path.join(DOCS_PROJECT_DIR, "openapi.json")
+    if openapi:
+        with open(openapi_path, "w", encoding="utf-8") as f:
+            json.dump(openapi, f, indent=2, ensure_ascii=False)
+    elif os.path.exists(openapi_path):
+        os.unlink(openapi_path)  # Clean up if no specs
+
+    result = {
         "message": f"Đã build {len(built)} docs vào {docs_dir}",
         "files": built,
         "site_config": config_path,
-    }, ensure_ascii=False)
+    }
+    if openapi:
+        result["openapi"] = openapi_path
+        result["api_endpoints"] = len(db.get("api_specs", []))
+
+    return json.dumps(result, ensure_ascii=False)
 
 
 def _kill_port(port):

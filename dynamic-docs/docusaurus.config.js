@@ -3,6 +3,9 @@ import {themes as prismThemes} from 'prism-react-renderer';
 import fs from 'fs';
 import path from 'path';
 import {fileURLToPath} from 'url';
+import {createRequire} from 'module';
+
+const require = createRequire(import.meta.url);
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -21,6 +24,10 @@ const orgName = siteConfig.organizationName || '';
 const projectName = siteConfig.projectName || 'docs';
 const footerLinks = siteConfig.footerLinks || [];
 const copyright = siteConfig.copyright || `Copyright © ${new Date().getFullYear()}. Built with Docusaurus.`;
+
+// Check if OpenAPI spec exists
+const openapiPath = path.join(__dirname, 'openapi.json');
+const hasOpenAPI = fs.existsSync(openapiPath);
 
 /** @type {import('@docusaurus/types').Config} */
 const config = {
@@ -52,6 +59,7 @@ const config = {
       ({
         docs: {
           sidebarPath: './sidebars.js',
+          docItemComponent: '@theme/ApiItem',
         },
         blog: false,
         theme: {
@@ -60,6 +68,44 @@ const config = {
       }),
     ],
   ],
+
+  plugins: [
+    ...(hasOpenAPI ? [
+      [
+        'docusaurus-plugin-openapi-docs',
+        /** @type {import('docusaurus-plugin-openapi-docs').Options} */
+        ({
+          id: 'api',
+          docsPluginId: 'default',
+          config: {
+            api: {
+              specPath: './openapi.json',
+              outputDir: './docs/api-reference',
+              sidebarOptions: {
+                groupPathsBy: 'tag',
+              },
+            },
+          },
+        }),
+      ],
+    ] : []),
+    function webpackPolyfillPlugin() {
+      return {
+        name: 'webpack-polyfill-plugin',
+        configureWebpack() {
+          return {
+            resolve: {
+              fallback: {
+                path: require.resolve('path-browserify'),
+              },
+            },
+          };
+        },
+      };
+    },
+  ],
+
+  themes: ['docusaurus-theme-openapi-docs'],
 
   themeConfig:
     /** @type {import('@docusaurus/preset-classic').ThemeConfig} */
@@ -76,6 +122,12 @@ const config = {
             position: 'left',
             label: 'Documentation',
           },
+          ...(hasOpenAPI ? [{
+            type: 'docSidebar',
+            sidebarId: 'api',
+            position: 'left',
+            label: 'API Reference',
+          }] : []),
         ],
       },
       footer: {
