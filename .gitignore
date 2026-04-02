@@ -1,2 +1,22 @@
-*.json
 __pycache__
+node_modules
+
+# Dynamic docs — generated content (mỗi project sẽ build riêng)
+dynamic-docs/docs/
+dynamic-docs/blog/
+dynamic-docs/site-config.json
+dynamic-docs/sidebars.js
+dynamic-docs/.docusaurus
+dynamic-docs/build
+dynamic-docs/package-lock.json
+
+# DB files (chứa data riêng mỗi project)
+*.db.json
+sync_state.json
+
+# Environment
+.env
+.env.*
+
+*.json
+!dynamic-docs/package.json
