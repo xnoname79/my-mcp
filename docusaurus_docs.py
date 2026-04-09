@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import signal
+import time
 from datetime import datetime
 
 from mcp.server.fastmcp import FastMCP
@@ -23,6 +24,17 @@ def save_db(data):
     data["last_updated"] = datetime.now().isoformat()
     with open(DB_FILE, "w") as f:
         json.dump(data, f, indent=4, ensure_ascii=False)
+
+
+def backup_db():
+    """Tạo file backup .bak trước khi reset."""
+    if not os.path.exists(DB_FILE):
+        return ""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    bak_path = f"{DB_FILE}.{timestamp}.bak"
+    with open(DB_FILE, "r") as src, open(bak_path, "w") as dst:
+        dst.write(src.read())
+    return bak_path
 
 
 # --------------- Document CRUD ---------------
@@ -351,10 +363,11 @@ def get_site_config():
 
 @mcp.tool()
 def reset_docs():
-    """Xóa toàn bộ docs, sidebar và site config để bắt đầu mới."""
+    """Xóa toàn bộ docs, sidebar và site config để bắt đầu mới. Tự động backup trước khi reset."""
+    bak = backup_db()
     db = {"docs": [], "sidebar": [], "site_config": {}, "last_updated": ""}
     save_db(db)
-    return "Đã reset toàn bộ docs, sidebar và site config."
+    return f"Đã reset toàn bộ docs, sidebar và site config. Backup: {bak}"
 
 
 @mcp.tool()
@@ -561,11 +574,68 @@ def delete_api_spec(index: int):
 
 @mcp.tool()
 def reset_api_specs():
-    """Xóa toàn bộ API specs."""
+    """Xóa toàn bộ API specs và schemas. Tự động backup trước khi reset."""
+    bak = backup_db()
     db = load_db()
     db["api_specs"] = []
+    db["schemas"] = {}
     save_db(db)
-    return "Đã reset toàn bộ API specs."
+    return f"Đã reset toàn bộ API specs và schemas. Backup: {bak}"
+
+
+@mcp.tool()
+def add_schema(name: str, schema: str):
+    """Thêm/cập nhật một schema definition cho OpenAPI components/schemas.
+
+    Dùng khi API specs có $ref tham chiếu đến schema, ví dụ: "$ref": "#/components/schemas/User".
+    Schema phải được define ở đây để openapi.json hợp lệ.
+
+    Args:
+        name: Tên schema, ví dụ "User", "StudentAssessment"
+        schema: JSON string mô tả schema, ví dụ:
+            {"type": "object", "properties": {"id": {"type": "integer"}, "name": {"type": "string"}}}
+    """
+    db = load_db()
+    schemas = db.setdefault("schemas", {})
+    try:
+        schemas[name] = json.loads(schema)
+    except json.JSONDecodeError:
+        return "Lỗi: schema không phải JSON hợp lệ."
+    save_db(db)
+    return f"Đã thêm/cập nhật schema: {name}"
+
+
+@mcp.tool()
+def list_schemas():
+    """Liệt kê tất cả schemas đã define."""
+    db = load_db()
+    schemas = db.get("schemas", {})
+    if not schemas:
+        return "Chưa có schema nào."
+    result = []
+    for name, schema_def in schemas.items():
+        result.append({
+            "name": name,
+            "type": schema_def.get("type", "object"),
+            "properties": list(schema_def.get("properties", {}).keys()),
+        })
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool()
+def delete_schema(name: str):
+    """Xóa một schema.
+
+    Args:
+        name: Tên schema cần xóa
+    """
+    db = load_db()
+    schemas = db.get("schemas", {})
+    if name not in schemas:
+        return f"Không tìm thấy schema '{name}'."
+    del schemas[name]
+    save_db(db)
+    return f"Đã xóa schema: {name}"
 
 
 def _build_openapi_json(db):
@@ -575,6 +645,7 @@ def _build_openapi_json(db):
         return None
 
     site_config = db.get("site_config", {})
+    schemas = db.get("schemas", {})
     openapi = {
         "openapi": "3.0.3",
         "info": {
@@ -592,6 +663,9 @@ def _build_openapi_json(db):
         if s.get("tag"):
             tag_set.add(s["tag"])
     openapi["tags"] = [{"name": t} for t in sorted(tag_set)]
+
+    # Track referenced schemas to validate
+    referenced_schemas = set()
 
     # Build paths
     for s in specs:
@@ -618,25 +692,62 @@ def _build_openapi_json(db):
             operation["parameters"] = s["parameters"]
 
         if s.get("request_body"):
+            schema = s["request_body"]
+            _collect_refs(schema, referenced_schemas)
             operation["requestBody"] = {
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": s["request_body"],
+                        "schema": schema,
                     },
                 },
             }
 
         if s.get("response_body"):
+            schema = s["response_body"]
+            _collect_refs(schema, referenced_schemas)
             operation["responses"][str(s.get("response_code", 200))]["content"] = {
                 "application/json": {
-                    "schema": s["response_body"],
+                    "schema": schema,
                 },
             }
 
         openapi["paths"][path][method] = operation
 
+    # Add components/schemas if any $ref are used
+    if schemas or referenced_schemas:
+        components = {}
+        for name, schema_def in schemas.items():
+            components[name] = schema_def
+
+        # Inline any $ref that points to missing schema to avoid broken references
+        for ref_name in referenced_schemas:
+            if ref_name not in components:
+                # Replace with a generic object so gen-api-docs doesn't crash
+                components[ref_name] = {
+                    "type": "object",
+                    "description": f"Schema: {ref_name}",
+                }
+
+        if components:
+            openapi["components"] = {"schemas": components}
+
     return openapi
+
+
+def _collect_refs(obj, refs):
+    """Recursively collect $ref schema names from a schema object."""
+    if isinstance(obj, dict):
+        if "$ref" in obj:
+            # Extract schema name from "#/components/schemas/Foo"
+            ref_val = obj["$ref"]
+            if ref_val.startswith("#/components/schemas/"):
+                refs.add(ref_val.split("/")[-1])
+        for v in obj.values():
+            _collect_refs(v, refs)
+    elif isinstance(obj, list):
+        for item in obj:
+            _collect_refs(item, refs)
 
 
 # --------------- Build & Serve ---------------
@@ -721,6 +832,7 @@ def build_docs():
     openapi = _build_openapi_json(db)
     openapi_path = os.path.join(DOCS_PROJECT_DIR, "openapi.json")
     api_gen_success = False
+    api_gen_error = ""
     if openapi:
         with open(openapi_path, "w", encoding="utf-8") as f:
             json.dump(openapi, f, indent=2, ensure_ascii=False)
@@ -741,15 +853,17 @@ def build_docs():
                 capture_output=True, text=True, timeout=120,
             )
             api_gen_success = gen_result.returncode == 0
-        except Exception:
-            pass
+            if not api_gen_success:
+                api_gen_error = gen_result.stderr[:500] if gen_result.stderr else gen_result.stdout[:500]
+        except Exception as e:
+            api_gen_error = str(e)
     elif os.path.exists(openapi_path):
         os.unlink(openapi_path)
 
     # Re-generate sidebars.js AFTER gen-api-docs (so sidebar.ts is up to date)
     if sidebar:
         api_sidebar_path = os.path.join(DOCS_PROJECT_DIR, "docs", "api-reference", "sidebar.ts")
-        has_api_sidebar = os.path.exists(api_sidebar_path)
+        has_api_sidebar = api_gen_success and os.path.exists(api_sidebar_path)
 
         if has_api_sidebar:
             sidebars_content = (
@@ -783,8 +897,101 @@ def build_docs():
         result["openapi"] = openapi_path
         result["api_endpoints"] = len(db.get("api_specs", []))
         result["api_docs_generated"] = api_gen_success
+        if not api_gen_success and api_gen_error:
+            result["api_gen_error"] = api_gen_error
 
     return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool()
+def gen_api_docs():
+    """Generate API documentation (MDX files + sidebar.ts) từ openapi.json.
+
+    Chạy npx docusaurus gen-api-docs api, sau đó cập nhật lại sidebars.js.
+    Dùng sau build_docs hoặc khi cần re-generate API docs riêng.
+
+    Flow: build_docs → gen_api_docs → serve_docs
+    """
+    if not DOCS_PROJECT_DIR:
+        return "Lỗi: DOCS_PROJECT_DIR chưa được set."
+
+    openapi_path = os.path.join(DOCS_PROJECT_DIR, "openapi.json")
+    if not os.path.exists(openapi_path):
+        # Try generate from DB first
+        db = load_db()
+        openapi = _build_openapi_json(db)
+        if openapi:
+            with open(openapi_path, "w", encoding="utf-8") as f:
+                json.dump(openapi, f, indent=2, ensure_ascii=False)
+        else:
+            return "Lỗi: Không có openapi.json và không có API specs trong DB."
+
+    docs_dir = os.path.join(DOCS_PROJECT_DIR, "docs")
+    api_ref_dir = os.path.join(docs_dir, "api-reference")
+
+    # Clean old generated files
+    try:
+        if os.path.isdir(api_ref_dir):
+            for fname in os.listdir(api_ref_dir):
+                fpath = os.path.join(api_ref_dir, fname)
+                if os.path.isfile(fpath):
+                    os.unlink(fpath)
+    except Exception:
+        pass
+
+    # Run gen-api-docs
+    try:
+        gen_result = subprocess.run(
+            ["npx", "docusaurus", "gen-api-docs", "api"],
+            cwd=DOCS_PROJECT_DIR,
+            capture_output=True, text=True, timeout=120,
+        )
+    except Exception as e:
+        return f"Lỗi: {e}"
+
+    if gen_result.returncode != 0:
+        error = gen_result.stderr[:500] if gen_result.stderr else gen_result.stdout[:500]
+        return json.dumps({
+            "success": False,
+            "error": error,
+        }, ensure_ascii=False)
+
+    # Update sidebars.js to import the new sidebar.ts
+    api_sidebar_path = os.path.join(api_ref_dir, "sidebar.ts")
+    if os.path.exists(api_sidebar_path):
+        db = load_db()
+        sidebar = db.get("sidebar", [])
+        if not sidebar:
+            auto_generate_sidebar()
+            db = load_db()
+            sidebar = db.get("sidebar", [])
+
+        if sidebar:
+            sidebars_content = (
+                "// Auto-generated by Docusaurus-Docs MCP\n"
+                "import apiSidebar from './docs/api-reference/sidebar.ts';\n\n"
+                "/** @type {import('@docusaurus/plugin-content-docs').SidebarsConfig} */\n"
+                "const sidebars = {\n"
+                f"  docs: {json.dumps(sidebar, indent=4, ensure_ascii=False)},\n"
+                "  api: apiSidebar,\n"
+                "};\n\n"
+                "export default sidebars;\n"
+            )
+            sidebars_path = os.path.join(DOCS_PROJECT_DIR, "sidebars.js")
+            with open(sidebars_path, "w", encoding="utf-8") as f:
+                f.write(sidebars_content)
+
+    # Count generated files
+    generated = []
+    if os.path.isdir(api_ref_dir):
+        generated = [f for f in os.listdir(api_ref_dir) if f.endswith(".mdx")]
+
+    return json.dumps({
+        "success": True,
+        "message": f"Đã generate {len(generated)} API docs",
+        "output_dir": api_ref_dir,
+        "sidebar_updated": os.path.exists(api_sidebar_path),
+    }, ensure_ascii=False)
 
 
 def _kill_port(port):
@@ -838,15 +1045,47 @@ def serve_docs(port: int = 30031):
     _serve_process = subprocess.Popen(
         ["npx", "docusaurus", "start", "--port", str(port), "--no-open"],
         cwd=DOCS_PROJECT_DIR,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
     )
 
+    # Wait up to 15s for server to start or crash
+    for _ in range(30):
+        time.sleep(0.5)
+
+        # Check if process crashed
+        if _serve_process.poll() is not None:
+            output = ""
+            try:
+                output = _serve_process.stdout.read().decode("utf-8", errors="replace")[-1000:]
+            except Exception:
+                pass
+            _serve_process = None
+            return json.dumps({
+                "success": False,
+                "message": "Server crashed khi khởi động",
+                "error": output,
+            }, ensure_ascii=False)
+
+        # Check if port is listening
+        check = subprocess.run(
+            ["lsof", "-ti", f":{port}"],
+            capture_output=True, text=True, timeout=3,
+        )
+        if check.stdout.strip():
+            return json.dumps({
+                "success": True,
+                "message": "Docusaurus dev server đang chạy",
+                "url": f"http://localhost:{port}",
+                "port": port,
+                "pid": _serve_process.pid,
+            }, ensure_ascii=False)
+
+    # Timeout — process alive but port not ready
     return json.dumps({
-        "message": "Docusaurus dev server đang chạy",
-        "url": f"http://localhost:{port}",
-        "port": port,
-        "pid": _serve_process.pid,
+        "success": False,
+        "message": "Server đã start nhưng port chưa sẵn sàng sau 15s",
+        "pid": _serve_process.pid if _serve_process else None,
     }, ensure_ascii=False)
 
 

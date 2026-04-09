@@ -1,5 +1,6 @@
 import json
 import os
+from datetime import datetime
 
 from mcp.server.fastmcp import FastMCP
 
@@ -18,6 +19,17 @@ def load_db():
 def save_db(data):
     with open(DB_FILE, "w") as f:
         json.dump(data, f, indent=4)
+
+
+def backup_db():
+    """Tạo file backup .bak trước khi reset."""
+    if not os.path.exists(DB_FILE):
+        return ""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    bak_path = f"{DB_FILE}.{timestamp}.bak"
+    with open(DB_FILE, "r") as src, open(bak_path, "w") as dst:
+        dst.write(src.read())
+    return bak_path
 
 
 @mcp.tool()
@@ -94,12 +106,13 @@ def update_api_requirement(
 
 @mcp.tool()
 def reset_api_requirements():
-    """Xóa toàn bộ API specs trong DB để bắt đầu mới."""
+    """Xóa toàn bộ API specs trong DB để bắt đầu mới. Tự động backup trước khi reset."""
+    bak = backup_db()
     db = load_db()
     db["api_requirements"] = []
     db["last_updated"] = ""
     save_db(db)
-    return "Đã xóa toàn bộ API specs. DB đã được reset."
+    return f"Đã xóa toàn bộ API specs. DB đã được reset. Backup: {bak}"
 
 
 if __name__ == "__main__":

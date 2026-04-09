@@ -21,3 +21,4 @@ sync_state.json
 
 *.json
 !dynamic-docs/package.json
+*.bak

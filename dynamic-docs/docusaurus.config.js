@@ -80,7 +80,7 @@ const config = {
           config: {
             api: {
               specPath: './openapi.json',
-              outputDir: './docs/api-reference',
+              outputDir: 'docs/api-reference',
               sidebarOptions: {
                 groupPathsBy: 'tag',
               },
