@@ -1,19 +1,32 @@
 ```sh
 pip install -r requirements.txt
 
-# Run sync-bridge
-# Run both for sources that need to share the context
-claude mcp add \
--e DB_FILE=/path/to/db_file.json \
--- sync-bridge /path/to/python /path/to/main.py
+# ─── sync-bridge (shared HTTP server) ───────────────────────────────
+# Start the server once — both BE and FE connect to the same instance.
+# The server auto-triggers FE when BE updates API specs (and vice versa).
 
-# Run issue-fetcher
+# 1. Start the sync-bridge HTTP server
+DB_FILE=/path/to/db_file.json python3 /path/to/main.py
+# Server runs at http://localhost:8989/mcp
+# Health check: curl http://localhost:8989/health
+
+# 2. In BE's Claude session — connect to the shared server
+claude mcp add --transport http sync-bridge http://localhost:8989/mcp
+
+# 3. In FE's Claude session — connect to the same server
+claude mcp add --transport http sync-bridge http://localhost:8989/mcp
+
+# Optional env vars:
+#   SYNC_HOST  — bind address (default: 0.0.0.0)
+#   SYNC_PORT  — port (default: 8989)
+
+# ─── issue-fetcher ──────────────────────────────────────────────────
 # Refer to this link to create your own github_token https://github.com/settings/tokens
 claude mcp add \
--e GITHUB_TOKEN=github_token \ 
+-e GITHUB_TOKEN=github_token \
 -- issue-fetcher /path/to/python /path/to/github_issues.py
 
-# Run sync-docs
+# ─── sync-docs ──────────────────────────────────────────────────────
 cd dynamic-docs && npm install
 
 claude mcp add \

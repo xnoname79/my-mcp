@@ -18,4 +18,14 @@ When needing a new API or changes to an existing API:
 3. Call `get_pending_requirements` to check if source has completed any pending requests.
 4. When integration is done for a spec, call `update_api_requirement` to set status to "done".
 
+### Auto-sync (Real-time notification)
+The sync-bridge server runs as a shared HTTP server. Both SOURCE and TARGET connect to the same instance.
+
+**TARGET workflow for real-time updates:**
+1. At the start of a session, call `watch_for_changes()` to check for any pending updates from SOURCE.
+2. After processing the returned changes, call `watch_for_changes(since="<last_timestamp>")` to block and wait for the next change.
+3. When `watch_for_changes` returns new changes, process them and loop back to step 2.
+
+**SOURCE does NOT need to do anything extra** — every call to `add_api_requirement`, `update_api_requirement`, or `reset_api_requirements` automatically triggers TARGET's `watch_for_changes`.
+
 This is a BLOCKING requirement — do not consider an API task complete until specs are synced.
