@@ -52,6 +52,7 @@ def _init_project_db(project: str):
             method TEXT NOT NULL,
             description TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'pending',
+            tag TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
@@ -63,6 +64,10 @@ def _init_project_db(project: str):
             requirement_json TEXT
         );
     """)
+    # migrate: add tag column if missing (existing DBs)
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(api_requirements)").fetchall()]
+    if "tag" not in cols:
+        conn.execute("ALTER TABLE api_requirements ADD COLUMN tag TEXT NOT NULL DEFAULT ''")
     conn.commit()
     conn.close()
 
@@ -122,7 +127,7 @@ async def health_check(request: Request):
 
 
 @mcp.tool()
-async def add_api_requirement(project: str, endpoint: str, method: str, description: str):
+async def add_api_requirement(project: str, endpoint: str, method: str, description: str, tag: str = ""):
     """Ghi lại yêu cầu API mới từ Agent FE hoặc BE.
 
     Args:
@@ -130,63 +135,77 @@ async def add_api_requirement(project: str, endpoint: str, method: str, descript
         endpoint: API endpoint (vd: "/api/users")
         method: HTTP method (GET, POST, PUT, DELETE, ...)
         description: Mô tả chi tiết bao gồm request/response format
+        tag: Label để phân loại spec cho app cụ thể (vd: "user-app", "admin-app"). Để trống = dùng chung.
     """
     async with _db_lock:
         _ensure_db(project)
         now = datetime.now().isoformat()
         conn = _get_conn(project)
         conn.execute(
-            "INSERT INTO api_requirements (endpoint, method, description, status, created_at, updated_at) VALUES (?, ?, ?, 'pending', ?, ?)",
-            (endpoint, method, description, now, now),
+            "INSERT INTO api_requirements (endpoint, method, description, status, tag, created_at, updated_at) VALUES (?, ?, ?, 'pending', ?, ?, ?)",
+            (endpoint, method, description, tag, now, now),
         )
-        req = {"endpoint": endpoint, "method": method, "description": description, "status": "pending"}
-        _log_change(conn, "add", f"Added {method} {endpoint}", req)
+        req = {"endpoint": endpoint, "method": method, "description": description, "status": "pending", "tag": tag}
+        _log_change(conn, "add", f"Added {method} {endpoint}" + (f" [{tag}]" if tag else ""), req)
         conn.commit()
         conn.close()
     _signal_change(project)
-    return f"[{project}] Đã ghi nhận yêu cầu API: {method} {endpoint}"
+    return f"[{project}] Đã ghi nhận yêu cầu API: {method} {endpoint}" + (f" (tag: {tag})" if tag else "")
 
 
 @mcp.tool()
-async def get_pending_requirements(project: str, status: str = ""):
+async def get_pending_requirements(project: str, status: str = "", tag: str = ""):
     """Lấy danh sách các API specs đang hoạt động (chưa done).
 
     Args:
         project: Tên project
         status: Lọc theo trạng thái cụ thể (vd: "pending", "discuss", "confirm").
                 Để trống = trả về tất cả specs chưa done.
+        tag: Lọc theo tag (vd: "user-app"). Để trống = trả về tất cả tags.
     """
     _ensure_db(project)
     conn = _get_conn(project)
+    query = "SELECT id, endpoint, method, description, status, tag FROM api_requirements WHERE 1=1"
+    params = []
     if status:
-        rows = conn.execute(
-            "SELECT id, endpoint, method, description, status FROM api_requirements WHERE status = ?", (status,)
-        ).fetchall()
+        query += " AND status = ?"
+        params.append(status)
     else:
-        rows = conn.execute(
-            "SELECT id, endpoint, method, description, status FROM api_requirements WHERE status != 'done'"
-        ).fetchall()
+        query += " AND status != 'done'"
+    if tag:
+        query += " AND tag = ?"
+        params.append(tag)
+    rows = conn.execute(query, params).fetchall()
     conn.close()
 
     if not rows:
-        msg = f"[{project}] Không có specs nào với status '{status}'." if status else f"[{project}] Không có specs nào đang hoạt động."
-        return msg
+        filters = []
+        if status:
+            filters.append(f"status='{status}'")
+        if tag:
+            filters.append(f"tag='{tag}'")
+        detail = f" ({', '.join(filters)})" if filters else ""
+        return f"[{project}] Không có specs nào đang hoạt động{detail}."
     return json.dumps([_row_to_dict(r) for r in rows], ensure_ascii=False)
 
 
 @mcp.tool()
-async def list_api_requirements(project: str):
+async def list_api_requirements(project: str, tag: str = ""):
     """Lấy toàn bộ danh sách API specs hiện có trong DB.
 
     Args:
         project: Tên project
+        tag: Lọc theo tag (vd: "user-app"). Để trống = trả về tất cả.
     """
     _ensure_db(project)
     conn = _get_conn(project)
-    rows = conn.execute("SELECT id, endpoint, method, description, status FROM api_requirements").fetchall()
+    if tag:
+        rows = conn.execute("SELECT id, endpoint, method, description, status, tag FROM api_requirements WHERE tag = ?", (tag,)).fetchall()
+    else:
+        rows = conn.execute("SELECT id, endpoint, method, description, status, tag FROM api_requirements").fetchall()
     conn.close()
     if not rows:
-        return f"[{project}] DB hiện đang trống."
+        return f"[{project}] DB hiện đang trống." + (f" (tag: {tag})" if tag else "")
     return json.dumps([_row_to_dict(r) for r in rows], ensure_ascii=False)
 
 
@@ -198,6 +217,7 @@ async def update_api_requirement(
     method: str = "",
     description: str = "",
     status: str = "",
+    tag: str = "",
 ):
     """Chỉnh sửa một API spec có sẵn theo id.
 
@@ -208,6 +228,7 @@ async def update_api_requirement(
         method: Method mới (để trống nếu không đổi)
         description: Mô tả mới (để trống nếu không đổi)
         status: Trạng thái mới (để trống nếu không đổi)
+        tag: Tag mới (để trống nếu không đổi)
     """
     async with _db_lock:
         _ensure_db(project)
@@ -236,6 +257,10 @@ async def update_api_requirement(
             updates.append("status = ?")
             params.append(status)
             changes.append(f"status={status}")
+        if tag:
+            updates.append("tag = ?")
+            params.append(tag)
+            changes.append(f"tag={tag}")
 
         if updates:
             updates.append("updated_at = ?")
