@@ -97,11 +97,23 @@ async def add_api_requirement(endpoint: str, method: str, description: str):
 
 
 @mcp.tool()
-async def get_pending_requirements():
-    """Lấy danh sách các API mà FE đang yêu cầu nhưng BE chưa làm."""
+async def get_pending_requirements(status: str = ""):
+    """Lấy danh sách các API specs đang hoạt động (chưa done).
+
+    Args:
+        status: Lọc theo trạng thái cụ thể (vd: "pending", "discuss", "confirm").
+                Để trống = trả về tất cả specs chưa done.
+    """
     db = load_db()
-    pending = [req for req in db["api_requirements"] if req["status"] == "pending"]
-    return json.dumps(pending, ensure_ascii=False) if pending else "Không có yêu cầu mới nào."
+    if status:
+        filtered = [req for req in db["api_requirements"] if req["status"] == status]
+    else:
+        filtered = [req for req in db["api_requirements"] if req["status"] != "done"]
+    if not filtered:
+        msg = f"Không có specs nào với status '{status}'." if status else "Không có specs nào đang hoạt động."
+        return msg
+    result = [{"index": i, **req} for i, req in enumerate(db["api_requirements"]) if req in filtered]
+    return json.dumps(result, ensure_ascii=False)
 
 
 @mcp.tool()
