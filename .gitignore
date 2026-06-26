@@ -22,3 +22,6 @@ sync_state.json
 *.json
 !dynamic-docs/package.json
 *.bak
+*.db
+*.db-wal
+*.db-shm
