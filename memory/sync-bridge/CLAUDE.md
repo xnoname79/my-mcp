@@ -21,6 +21,22 @@ Use `list_projects()` to see all available projects.
 Use `get_pending_requirements(project="my-app")` để lấy tất cả specs chưa done.
 Use `get_pending_requirements(project="my-app", status="discuss")` để lọc theo status cụ thể.
 
+### Tag (multi-app filtering)
+When a project has multiple frontend apps (e.g. user-app, admin-app), use `tag` to scope specs.
+Each app's CLAUDE.md should define its project and tag so all tool calls are automatic:
+
+```markdown
+# In your project's CLAUDE.md, add:
+When using sync-bridge MCP, always use project="<project>" and tag="<tag>" for all tool calls.
+```
+
+Example setup:
+- `fe-user-app/CLAUDE.md`: `When using sync-bridge MCP, always use project="blog-app" and tag="user-app" for all tool calls.`
+- `fe-admin-app/CLAUDE.md`: `When using sync-bridge MCP, always use project="blog-app" and tag="admin-app" for all tool calls.`
+- `be-blog/CLAUDE.md`: `When using sync-bridge MCP, always use project="blog-app" for all tool calls. Use tag to target specific frontend apps.`
+
+SOURCE (BE) can set tag when creating specs to target a specific app, or leave it empty for shared specs.
+
 ### Role: SOURCE (API provider — e.g. BE, API server)
 After EVERY code change that affects an API (new endpoint, updated request/response, changed behavior):
 1. Call `add_api_requirement` or `update_api_requirement` to sync the change with target.
