@@ -16,8 +16,10 @@ pending → discuss → confirmed → done
 - **confirmed**: Cả hai bên đã thống nhất spec, sẵn sàng implement
 - **done**: Đã implement và integrate xong
 
-Use `get_pending_requirements()` (không param) để lấy tất cả specs chưa done.
-Use `get_pending_requirements(status="discuss")` để lọc theo status cụ thể.
+All tools require a `project` parameter to identify which project to work on.
+Use `list_projects()` to see all available projects.
+Use `get_pending_requirements(project="my-app")` để lấy tất cả specs chưa done.
+Use `get_pending_requirements(project="my-app", status="discuss")` để lọc theo status cụ thể.
 
 ### Role: SOURCE (API provider — e.g. BE, API server)
 After EVERY code change that affects an API (new endpoint, updated request/response, changed behavior):

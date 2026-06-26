@@ -2,25 +2,21 @@
 pip install -r requirements.txt
 
 # ─── sync-bridge (shared HTTP server) ───────────────────────────────
-# Start the server once — both BE and FE connect to the same instance.
-# The server auto-triggers FE when BE updates API specs (and vice versa).
+# One server handles ALL projects. DB auto-created per project at
+# ~/.sync_bridge_db/<project>.db
 
-# 1. Start the sync-bridge HTTP server
-python3 /path/to/main.py my-project
-# DB auto-created at ~/.sync_bridge_db/my-project.db
-# Server runs at http://localhost:8989/mcp
-# Health check: curl http://localhost:8989/health
+# 1. Start the sync-bridge HTTP server (one time)
+python3 /path/to/main.py
 
-# 2. In BE's Claude session — connect to the shared server
+# 2. Connect from any Claude session (BE, FE, etc.)
 claude mcp add --transport http sync-bridge http://localhost:8989/mcp
 
-# 3. In FE's Claude session — connect to the same server
-claude mcp add --transport http sync-bridge http://localhost:8989/mcp
+# That's it! Project is specified in each tool call, not in setup.
+# One server, one port, unlimited projects.
 
 # Optional env vars:
 #   SYNC_HOST  — bind address (default: 0.0.0.0)
 #   SYNC_PORT  — port (default: 8989)
-#   DB_FILE    — override DB path (default: ~/.sync_bridge_db/<name>.db)
 
 # ─── issue-fetcher ──────────────────────────────────────────────────
 # Refer to this link to create your own github_token https://github.com/settings/tokens

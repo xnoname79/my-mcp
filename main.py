@@ -1,6 +1,5 @@
 import json
 import os
-import sys
 import sqlite3
 import asyncio
 from datetime import datetime
@@ -13,37 +12,39 @@ from starlette.responses import JSONResponse
 from mcp.server.fastmcp import FastMCP
 
 DB_DIR = Path.home() / ".sync_bridge_db"
-
-def _resolve_db_path():
-    if os.environ.get("DB_FILE"):
-        return os.environ["DB_FILE"]
-    name = sys.argv[1] if len(sys.argv) > 1 else "default"
-    DB_DIR.mkdir(parents=True, exist_ok=True)
-    return str(DB_DIR / f"{name}.db")
-
-DB_FILE = _resolve_db_path()
 SYNC_HOST = os.environ.get("SYNC_HOST", "0.0.0.0")
 SYNC_PORT = int(os.environ.get("SYNC_PORT", "8989"))
 
 _db_lock = asyncio.Lock()
-_change_event = anyio.Event()
+_change_events: dict[str, anyio.Event] = {}
 
 
-def _signal_change():
-    global _change_event
-    _change_event.set()
-    _change_event = anyio.Event()
+def _get_event(project: str) -> anyio.Event:
+    if project not in _change_events:
+        _change_events[project] = anyio.Event()
+    return _change_events[project]
 
 
-def _get_conn():
-    conn = sqlite3.connect(DB_FILE)
+def _signal_change(project: str):
+    if project in _change_events:
+        _change_events[project].set()
+    _change_events[project] = anyio.Event()
+
+
+def _db_path(project: str) -> str:
+    DB_DIR.mkdir(parents=True, exist_ok=True)
+    return str(DB_DIR / f"{project}.db")
+
+
+def _get_conn(project: str):
+    conn = sqlite3.connect(_db_path(project))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
 
-def _init_db():
-    conn = _get_conn()
+def _init_project_db(project: str):
+    conn = _get_conn(project)
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS api_requirements (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -66,6 +67,12 @@ def _init_db():
     conn.close()
 
 
+def _ensure_db(project: str):
+    db_path = _db_path(project)
+    if not os.path.exists(db_path):
+        _init_project_db(project)
+
+
 def _log_change(conn, action, detail, requirement=None):
     ts = datetime.now().isoformat()
     conn.execute(
@@ -78,12 +85,13 @@ def _row_to_dict(row):
     return dict(row)
 
 
-def _backup_db():
-    if not os.path.exists(DB_FILE):
+def _backup_db(project: str):
+    db_path = _db_path(project)
+    if not os.path.exists(db_path):
         return ""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    bak_path = f"{DB_FILE}.{timestamp}.bak"
-    src = sqlite3.connect(DB_FILE)
+    bak_path = f"{db_path}.{timestamp}.bak"
+    src = sqlite3.connect(db_path)
     dst = sqlite3.connect(bak_path)
     src.backup(dst)
     src.close()
@@ -93,7 +101,6 @@ def _backup_db():
 
 @asynccontextmanager
 async def lifespan(server):
-    _init_db()
     yield {}
 
 
@@ -107,18 +114,27 @@ mcp = FastMCP(
 
 @mcp.custom_route("/health", methods=["GET"])
 async def health_check(request: Request):
-    return JSONResponse({"status": "ok", "server": "Agent-Sync-Bridge"})
+    projects = [f.stem for f in DB_DIR.glob("*.db")] if DB_DIR.exists() else []
+    return JSONResponse({"status": "ok", "server": "Agent-Sync-Bridge", "projects": projects})
 
 
 # ─── Tools ────────────────────────────────────────────────────────────────────
 
 
 @mcp.tool()
-async def add_api_requirement(endpoint: str, method: str, description: str):
-    """Ghi lại yêu cầu API mới từ Agent FE hoặc BE."""
+async def add_api_requirement(project: str, endpoint: str, method: str, description: str):
+    """Ghi lại yêu cầu API mới từ Agent FE hoặc BE.
+
+    Args:
+        project: Tên project (vd: "my-app", "ecommerce"). DB tự tạo tại ~/.sync_bridge_db/<project>.db
+        endpoint: API endpoint (vd: "/api/users")
+        method: HTTP method (GET, POST, PUT, DELETE, ...)
+        description: Mô tả chi tiết bao gồm request/response format
+    """
     async with _db_lock:
+        _ensure_db(project)
         now = datetime.now().isoformat()
-        conn = _get_conn()
+        conn = _get_conn(project)
         conn.execute(
             "INSERT INTO api_requirements (endpoint, method, description, status, created_at, updated_at) VALUES (?, ?, ?, 'pending', ?, ?)",
             (endpoint, method, description, now, now),
@@ -127,19 +143,21 @@ async def add_api_requirement(endpoint: str, method: str, description: str):
         _log_change(conn, "add", f"Added {method} {endpoint}", req)
         conn.commit()
         conn.close()
-    _signal_change()
-    return f"Đã ghi nhận yêu cầu API: {method} {endpoint}"
+    _signal_change(project)
+    return f"[{project}] Đã ghi nhận yêu cầu API: {method} {endpoint}"
 
 
 @mcp.tool()
-async def get_pending_requirements(status: str = ""):
+async def get_pending_requirements(project: str, status: str = ""):
     """Lấy danh sách các API specs đang hoạt động (chưa done).
 
     Args:
+        project: Tên project
         status: Lọc theo trạng thái cụ thể (vd: "pending", "discuss", "confirm").
                 Để trống = trả về tất cả specs chưa done.
     """
-    conn = _get_conn()
+    _ensure_db(project)
+    conn = _get_conn(project)
     if status:
         rows = conn.execute(
             "SELECT id, endpoint, method, description, status FROM api_requirements WHERE status = ?", (status,)
@@ -151,24 +169,30 @@ async def get_pending_requirements(status: str = ""):
     conn.close()
 
     if not rows:
-        msg = f"Không có specs nào với status '{status}'." if status else "Không có specs nào đang hoạt động."
+        msg = f"[{project}] Không có specs nào với status '{status}'." if status else f"[{project}] Không có specs nào đang hoạt động."
         return msg
     return json.dumps([_row_to_dict(r) for r in rows], ensure_ascii=False)
 
 
 @mcp.tool()
-async def list_api_requirements():
-    """Lấy toàn bộ danh sách API specs hiện có trong DB."""
-    conn = _get_conn()
+async def list_api_requirements(project: str):
+    """Lấy toàn bộ danh sách API specs hiện có trong DB.
+
+    Args:
+        project: Tên project
+    """
+    _ensure_db(project)
+    conn = _get_conn(project)
     rows = conn.execute("SELECT id, endpoint, method, description, status FROM api_requirements").fetchall()
     conn.close()
     if not rows:
-        return "DB hiện đang trống."
+        return f"[{project}] DB hiện đang trống."
     return json.dumps([_row_to_dict(r) for r in rows], ensure_ascii=False)
 
 
 @mcp.tool()
 async def update_api_requirement(
+    project: str,
     id: int,
     endpoint: str = "",
     method: str = "",
@@ -178,6 +202,7 @@ async def update_api_requirement(
     """Chỉnh sửa một API spec có sẵn theo id.
 
     Args:
+        project: Tên project
         id: ID của API spec (lấy từ list_api_requirements hoặc get_pending_requirements)
         endpoint: Endpoint mới (để trống nếu không đổi)
         method: Method mới (để trống nếu không đổi)
@@ -185,11 +210,12 @@ async def update_api_requirement(
         status: Trạng thái mới (để trống nếu không đổi)
     """
     async with _db_lock:
-        conn = _get_conn()
+        _ensure_db(project)
+        conn = _get_conn(project)
         row = conn.execute("SELECT * FROM api_requirements WHERE id = ?", (id,)).fetchone()
         if not row:
             conn.close()
-            return f"Lỗi: id {id} không tồn tại."
+            return f"[{project}] Lỗi: id {id} không tồn tại."
 
         updates = []
         params = []
@@ -221,37 +247,44 @@ async def update_api_requirement(
         _log_change(conn, "update", f"Updated #{id} {updated['method']} {updated['endpoint']}: {', '.join(changes)}", _row_to_dict(updated))
         conn.commit()
         conn.close()
-    _signal_change()
-    return f"Đã cập nhật API spec #{id}: {updated['method']} {updated['endpoint']}"
+    _signal_change(project)
+    return f"[{project}] Đã cập nhật API spec #{id}: {updated['method']} {updated['endpoint']}"
 
 
 @mcp.tool()
-async def reset_api_requirements():
-    """Xóa toàn bộ API specs trong DB để bắt đầu mới. Tự động backup trước khi reset."""
+async def reset_api_requirements(project: str):
+    """Xóa toàn bộ API specs trong DB để bắt đầu mới. Tự động backup trước khi reset.
+
+    Args:
+        project: Tên project
+    """
     async with _db_lock:
-        bak = _backup_db()
-        conn = _get_conn()
+        _ensure_db(project)
+        bak = _backup_db(project)
+        conn = _get_conn(project)
         count = conn.execute("SELECT COUNT(*) FROM api_requirements").fetchone()[0]
         conn.execute("DELETE FROM api_requirements")
         _log_change(conn, "reset", f"Reset DB ({count} specs cleared). Backup: {bak}")
         conn.commit()
         conn.close()
-    _signal_change()
-    return f"Đã xóa toàn bộ API specs. DB đã được reset. Backup: {bak}"
+    _signal_change(project)
+    return f"[{project}] Đã xóa toàn bộ API specs. DB đã được reset. Backup: {bak}"
 
 
 @mcp.tool()
-async def watch_for_changes(since: str = "", timeout: int = 30):
+async def watch_for_changes(project: str, since: str = "", timeout: int = 30):
     """Chờ đợi thay đổi mới từ phía đối tác (BE hoặc FE). Tool sẽ block cho đến khi
     có thay đổi mới hoặc hết timeout.
 
     Args:
+        project: Tên project
         since: ISO timestamp - chỉ trả về changes sau thời điểm này. Để trống = lấy tất cả.
         timeout: Số giây tối đa chờ thay đổi (mặc định 30, tối đa 120).
     """
     timeout = max(1, min(timeout, 120))
+    _ensure_db(project)
 
-    conn = _get_conn()
+    conn = _get_conn(project)
     if since:
         rows = conn.execute("SELECT * FROM change_log WHERE timestamp > ? ORDER BY id", (since,)).fetchall()
     else:
@@ -261,14 +294,14 @@ async def watch_for_changes(since: str = "", timeout: int = 30):
     if rows:
         return json.dumps([_row_to_dict(r) for r in rows], ensure_ascii=False)
 
-    current_event = _change_event
+    current_event = _get_event(project)
     try:
         with anyio.fail_after(timeout):
             await current_event.wait()
     except TimeoutError:
-        return json.dumps({"status": "timeout", "message": f"Không có thay đổi nào trong {timeout}s."})
+        return json.dumps({"status": "timeout", "message": f"[{project}] Không có thay đổi nào trong {timeout}s."})
 
-    conn = _get_conn()
+    conn = _get_conn(project)
     if since:
         rows = conn.execute("SELECT * FROM change_log WHERE timestamp > ? ORDER BY id", (since,)).fetchall()
     else:
@@ -278,43 +311,46 @@ async def watch_for_changes(since: str = "", timeout: int = 30):
 
 
 @mcp.tool()
-async def get_change_log(limit: int = 20):
+async def get_change_log(project: str, limit: int = 20):
     """Lấy lịch sử thay đổi gần nhất.
 
     Args:
+        project: Tên project
         limit: Số lượng entries tối đa trả về (mặc định 20).
     """
-    conn = _get_conn()
+    _ensure_db(project)
+    conn = _get_conn(project)
     rows = conn.execute("SELECT * FROM change_log ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
     conn.close()
     if not rows:
-        return "Chưa có thay đổi nào."
+        return f"[{project}] Chưa có thay đổi nào."
     return json.dumps([_row_to_dict(r) for r in reversed(rows)], ensure_ascii=False)
+
+
+@mcp.tool()
+async def list_projects():
+    """Liệt kê tất cả projects hiện có trong sync-bridge."""
+    if not DB_DIR.exists():
+        return "Chưa có project nào."
+    projects = sorted(f.stem for f in DB_DIR.glob("*.db"))
+    if not projects:
+        return "Chưa có project nào."
+    return json.dumps(projects, ensure_ascii=False)
 
 
 # ─── Resources ────────────────────────────────────────────────────────────────
 
 
-@mcp.resource("sync-bridge://requirements")
-def requirements_resource():
-    """Toàn bộ API requirements hiện tại."""
-    conn = _get_conn()
-    rows = conn.execute("SELECT id, endpoint, method, description, status FROM api_requirements").fetchall()
-    conn.close()
-    return json.dumps([_row_to_dict(r) for r in rows], indent=2, ensure_ascii=False)
-
-
-@mcp.resource("sync-bridge://changelog")
-def changelog_resource():
-    """50 thay đổi gần nhất."""
-    conn = _get_conn()
-    rows = conn.execute("SELECT * FROM change_log ORDER BY id DESC LIMIT 50").fetchall()
-    conn.close()
-    return json.dumps([_row_to_dict(r) for r in reversed(rows)], indent=2, ensure_ascii=False)
+@mcp.resource("sync-bridge://projects")
+def projects_resource():
+    """Danh sách tất cả projects."""
+    if not DB_DIR.exists():
+        return "[]"
+    projects = sorted(f.stem for f in DB_DIR.glob("*.db"))
+    return json.dumps(projects, indent=2, ensure_ascii=False)
 
 
 # ─── Entry Point ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    _init_db()
     mcp.run(transport="streamable-http")
