@@ -22,7 +22,6 @@ from datetime import datetime
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-import anyio
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from mcp.server.fastmcp import FastMCP
@@ -32,19 +31,6 @@ SYNC_HOST = os.environ.get("SYNC_HOST", "0.0.0.0")
 SYNC_PORT = int(os.environ.get("SYNC_PORT", "8989"))
 
 _db_lock = asyncio.Lock()
-_change_events: dict[str, anyio.Event] = {}
-
-
-def _get_event(project: str) -> anyio.Event:
-    if project not in _change_events:
-        _change_events[project] = anyio.Event()
-    return _change_events[project]
-
-
-def _signal_change(project: str):
-    if project in _change_events:
-        _change_events[project].set()
-    _change_events[project] = anyio.Event()
 
 
 def _db_path(project: str) -> str:
@@ -165,7 +151,7 @@ async def add_api_requirement(project: str, endpoint: str, method: str, descript
         _log_change(conn, "add", f"Added {method} {endpoint}" + (f" [{tag}]" if tag else ""), req)
         conn.commit()
         conn.close()
-    _signal_change(project)
+
     return f"[{project}] Đã ghi nhận yêu cầu API: {method} {endpoint}" + (f" (tag: {tag})" if tag else "")
 
 
@@ -288,7 +274,7 @@ async def update_api_requirement(
         _log_change(conn, "update", f"Updated #{id} {updated['method']} {updated['endpoint']}: {', '.join(changes)}", _row_to_dict(updated))
         conn.commit()
         conn.close()
-    _signal_change(project)
+
     return f"[{project}] Đã cập nhật API spec #{id}: {updated['method']} {updated['endpoint']}"
 
 
@@ -308,47 +294,8 @@ async def reset_api_requirements(project: str):
         _log_change(conn, "reset", f"Reset DB ({count} specs cleared). Backup: {bak}")
         conn.commit()
         conn.close()
-    _signal_change(project)
+
     return f"[{project}] Đã xóa toàn bộ API specs. DB đã được reset. Backup: {bak}"
-
-
-@mcp.tool()
-async def watch_for_changes(project: str, since: str = "", timeout: int = 30):
-    """Chờ đợi thay đổi mới từ phía đối tác (BE hoặc FE). Tool sẽ block cho đến khi
-    có thay đổi mới hoặc hết timeout.
-
-    Args:
-        project: Tên project
-        since: ISO timestamp - chỉ trả về changes sau thời điểm này. Để trống = lấy tất cả.
-        timeout: Số giây tối đa chờ thay đổi (mặc định 30, tối đa 120).
-    """
-    timeout = max(1, min(timeout, 120))
-    _ensure_db(project)
-
-    conn = _get_conn(project)
-    if since:
-        rows = conn.execute("SELECT * FROM change_log WHERE timestamp > ? ORDER BY id", (since,)).fetchall()
-    else:
-        rows = conn.execute("SELECT * FROM change_log ORDER BY id").fetchall()
-    conn.close()
-
-    if rows:
-        return json.dumps([_row_to_dict(r) for r in rows], ensure_ascii=False)
-
-    current_event = _get_event(project)
-    try:
-        with anyio.fail_after(timeout):
-            await current_event.wait()
-    except TimeoutError:
-        return json.dumps({"status": "timeout", "message": f"[{project}] Không có thay đổi nào trong {timeout}s."})
-
-    conn = _get_conn(project)
-    if since:
-        rows = conn.execute("SELECT * FROM change_log WHERE timestamp > ? ORDER BY id", (since,)).fetchall()
-    else:
-        rows = conn.execute("SELECT * FROM change_log ORDER BY id").fetchall()
-    conn.close()
-    return json.dumps([_row_to_dict(r) for r in rows], ensure_ascii=False) if rows else json.dumps({"status": "no_changes"})
 
 
 @mcp.tool()
