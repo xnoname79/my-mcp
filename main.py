@@ -299,23 +299,6 @@ async def reset_api_requirements(project: str):
 
 
 @mcp.tool()
-async def get_change_log(project: str, limit: int = 20):
-    """Lấy lịch sử thay đổi gần nhất.
-
-    Args:
-        project: Tên project
-        limit: Số lượng entries tối đa trả về (mặc định 20).
-    """
-    _ensure_db(project)
-    conn = _get_conn(project)
-    rows = conn.execute("SELECT * FROM change_log ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
-    conn.close()
-    if not rows:
-        return f"[{project}] Chưa có thay đổi nào."
-    return json.dumps([_row_to_dict(r) for r in reversed(rows)], ensure_ascii=False)
-
-
-@mcp.tool()
 async def list_projects():
     """Liệt kê tất cả projects hiện có trong sync-bridge."""
     if not DB_DIR.exists():
