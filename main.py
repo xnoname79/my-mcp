@@ -2,13 +2,12 @@
 Agent-Sync-Bridge MCP Server
 
 Shared HTTP server (streamable-http) that synchronizes API specs between
-multiple Claude sessions (BE, FE, etc.) in real-time.
+multiple Claude sessions (BE, FE, etc.).
 
 Architecture:
   - One server process, one port, unlimited projects
   - Each project gets its own SQLite DB at ~/.sync_bridge_db/<project>.db
-  - Real-time sync via in-memory anyio.Event per project
-  - Tag-based filtering for multi-app projects (e.g. user-app, admin-app)
+  - Tag-based filtering for multi-app projects
 
 Start:  python3 main.py
 Setup:  ./setup.sh --project <name> [--tag <tag>]
@@ -66,7 +65,6 @@ def _init_project_db(project: str):
             requirement_json TEXT
         );
     """)
-    # migrate: add tag column if missing (existing DBs)
     cols = [r[1] for r in conn.execute("PRAGMA table_info(api_requirements)").fetchall()]
     if "tag" not in cols:
         conn.execute("ALTER TABLE api_requirements ADD COLUMN tag TEXT NOT NULL DEFAULT ''")
